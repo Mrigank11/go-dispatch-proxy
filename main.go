@@ -77,17 +77,23 @@ func forward_connections(local_conn, remote_conn net.Conn) {
 /*
 	bind conn to interface
 */
-func bindToDevice(conn net.Conn, device string) error {
+func bindToDevice(conn net.Conn, device string) (net.Conn, error) {
 	ptrVal := reflect.ValueOf(conn)
-	val := reflect.Indirect(ptrVal)
-	//next line will get you the net.netFD
-	fdmember := val.FieldByName("fd")
-	val1 := reflect.Indirect(fdmember)
-	netFdPtr := val1.FieldByName("sysfd")
-	fd := int(netFdPtr.Int())
-	//fd now has the actual fd for the socket
-	return syscall.SetsockoptString(fd, syscall.SOL_SOCKET,
-		syscall.SO_BINDTODEVICE, device)
+	tc := ptrVal.Interface().(*net.TCPConn)
+	f, _ := tc.File()
+	defer f.Close()
+
+	err := syscall.BindToDevice(int(f.Fd()), device)
+	if err != nil {
+		return nil, err
+	}
+
+	// https://github.com/ryanchapman/go-any-proxy/blob/master/any_proxy.go#L459
+	newConn, err := net.FileConn(f)
+	if err != nil {
+		return nil, err
+	}
+	return newConn, nil
 }
 
 /*
@@ -105,9 +111,11 @@ func server_response(local_conn net.Conn, address string) {
 		remote_conn, err = net.DialTCP("tcp4", local_addr, remote_addr)
 	} else {
 		remote_conn, err = net.Dial("tcp4", address)
-		err := bindToDevice(remote_conn, load_balancer.ifname)
-		if err != nil {
-			log.Fatal("[FATAL] Failed to bind socket to interface ", load_balancer.ifname)
+		if err == nil {
+			remote_conn, err = bindToDevice(remote_conn, load_balancer.ifname)
+			if err != nil {
+				log.Fatal("[FATAL] Failed to bind socket to interface: ", err)
+			}
 		}
 	}
 
@@ -179,6 +187,8 @@ func parse_load_balancers(args []string) {
 			} else {
 				log.Fatal("[FATAL] Invalid address ", lb_ip)
 			}
+		} else {
+			lb_ip = fmt.Sprintf("%s:0", lb_ip)
 		}
 		var cont_ratio int = 1
 		if len(splitted) > 1 {
@@ -190,7 +200,7 @@ func parse_load_balancers(args []string) {
 		}
 
 		log.Printf("[INFO] Load balancer %d: %s%s, contention ratio: %d\n", idx+1, lb_ip, lb_ifname, cont_ratio)
-		lb_list[idx] = load_balancer{address: fmt.Sprintf("%s:0", lb_ip), contention_ratio: cont_ratio, current_connections: 0, ifname: lb_ifname}
+		lb_list[idx] = load_balancer{address: lb_ip, contention_ratio: cont_ratio, current_connections: 0, ifname: lb_ifname}
 	}
 }
 
@@ -199,7 +209,7 @@ func parse_load_balancers(args []string) {
 */
 func main() {
 	var lhost = flag.String("lhost", "127.0.0.1", "the host to listen for SOCKS connection")
-	var lport = flag.Int("lport", 8080, "the local port to listen for SOCKS connection")
+	var lport = flag.Int("lport", 1080, "the local port to listen for SOCKS connection")
 	var detect = flag.Bool("list", false, "shows the available addresses for dispatching ")
 
 	flag.Parse()
