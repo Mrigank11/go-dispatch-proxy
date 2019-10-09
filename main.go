@@ -107,10 +107,10 @@ func server_response(local_conn net.Conn, address string) {
 	remote_addr, _ := net.ResolveTCPAddr("tcp4", address)
 	var remote_conn net.Conn
 	var err error
-	if load_balancer_addr != "" {
+	if runtime.GOOS != "linux" {
 		remote_conn, err = net.DialTCP("tcp4", local_addr, remote_addr)
 	} else {
-		remote_conn, err = net.Dial("tcp4", address)
+		remote_conn, err = net.DialTCP("tcp4", local_addr, remote_addr)
 		if err == nil {
 			remote_conn, err = bindToDevice(remote_conn, load_balancer.ifname)
 			if err != nil {
@@ -125,7 +125,7 @@ func server_response(local_conn net.Conn, address string) {
 		local_conn.Close()
 		return
 	}
-	log.Println("[DEBUG]", address, "->", load_balancer_addr, load_balancer.ifname)
+	log.Println("[DEBUG]", address, "->", load_balancer_addr, "@", load_balancer.ifname)
 	local_conn.Write([]byte{5, SUCCESS, 0, 1, 0, 0, 0, 0, 0, 0})
 	forward_connections(local_conn, remote_conn)
 }
@@ -162,12 +162,29 @@ func detect_interfaces() {
 
 }
 
+
 /*
 	Parses the command line arguements to obtain the list of load balancers
 */
 func parse_load_balancers(args []string) {
 	if len(args) == 0 {
 		log.Fatal("[FATAL] Please specify one or more load balancers")
+	}
+
+	ipIfname := make(map[string]string)
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		log.Fatal("[FATAL] ", err)
+	}
+
+	for _, ifc := range interfaces {
+		addrs, err := ifc.Addrs()
+		if err != nil {
+			log.Fatal("[FATAL] ", err)
+		}
+		for _, addr := range addrs {
+			ipIfname[strings.Split(addr.String(), "/")[0]] = ifc.Name
+		}
 	}
 
 	lb_list = make([]load_balancer, flag.NArg())
@@ -177,19 +194,13 @@ func parse_load_balancers(args []string) {
 		var lb_ip = splitted[0]
 		var lb_ifname string
 		if net.ParseIP(lb_ip).To4() == nil {
-			// use it as ifname in Linux
-			if runtime.GOOS == "linux" {
-				lb_ifname = lb_ip
-				lb_ip = ""
-				if _, err := net.InterfaceByName(lb_ifname);err!=nil {
-					log.Fatal("[FATAL] Invalid interface name ", lb_ifname)
-				}
-			} else {
-				log.Fatal("[FATAL] Invalid address ", lb_ip)
-			}
-		} else {
-			lb_ip = fmt.Sprintf("%s:0", lb_ip)
+			log.Fatal("[FATAL] Invalid address ", lb_ip)
 		}
+		if _,ok := ipIfname[lb_ip];!ok {
+			log.Fatal("[FATAL] Unable to find any interface with ip: ", lb_ip)
+		}
+		lb_ifname = ipIfname[lb_ip]
+		lb_ip = fmt.Sprintf("%s:0", lb_ip)
 		var cont_ratio int = 1
 		if len(splitted) > 1 {
 			var err error
@@ -199,7 +210,7 @@ func parse_load_balancers(args []string) {
 			}
 		}
 
-		log.Printf("[INFO] Load balancer %d: %s%s, contention ratio: %d\n", idx+1, lb_ip, lb_ifname, cont_ratio)
+		log.Printf("[INFO] Load balancer %d: %s@%s, contention ratio: %d\n", idx+1, lb_ip, lb_ifname, cont_ratio)
 		lb_list[idx] = load_balancer{address: lb_ip, contention_ratio: cont_ratio, current_connections: 0, ifname: lb_ifname}
 	}
 }
